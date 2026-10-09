@@ -1,78 +1,59 @@
 # hermes-quote-selection
 
-A desktop plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/).
-Select part of an agent reply, then press **Cmd+Option+L** or click **Add to chat**.
-The quote appears as a chip inside the chat input, inline with your text, like Cmd+L in Devin.
-When you send, the chips become Markdown `>` quote lines where they sit in the message.
+A small Hermes Desktop plugin for quoting agent output back at the agent.
 
-## Installation
+Select part of a reply, press **Cmd+Option+L**, and the text lands in the composer as a chip - the same gesture as Cmd+L in Devin. The chips sit inline, so you can type right next to them. When you send, each chip becomes `> ` quote lines where it sits.
 
-### Option 1: Install from Git
+Prefer clicking? Selecting text in a reply also pops up an **Add to chat** button.
 
-In Hermes Desktop, open **Capabilities > Plugins > Install from Git** and paste:
+## Why
 
-```
-https://github.com/fquresh/hermes-quote-selection
-```
+Hermes replies are long, and most questions are about one sentence, not the whole thing. The built-in Cmd+L only handles terminal and file-preview selections - on chat messages it just focuses the input. So quoting meant copy, paste, add `> ` by hand:
 
-### Option 2: Copy by hand
+![Quoting used to paste raw `>` text into the input](docs/v0-plain-text.png)
 
-1. Create the plugin folder. The folder name matches the plugin id:
+Devin gets this right: select, press a key, get a chip inline in the input:
 
-   ```bash
-   # macOS / Linux: ~/.hermes/desktop-plugins/quote-selection/
-   # Windows: %USERPROFILE%\.hermes\desktop-plugins\quote-selection\
-   mkdir -p ~/.hermes/desktop-plugins/quote-selection
-   ```
+![Devin's composer, with quote chips inline in the text](docs/inspiration-devin.png)
 
-2. Copy `plugin.js` into it:
+An earlier version of this plugin drew chips in a row *above* the input instead. It worked, but you couldn't tell where a quote would land or type around it:
 
-   ```bash
-   cp plugin.js ~/.hermes/desktop-plugins/quote-selection/
-   ```
+![The previous version: chips in a bar above the input](docs/v1-chip-row.png)
 
-3. In Hermes Desktop, open the command palette (Cmd+K / Ctrl+K) and run **Reload desktop plugins**.
+Now the chips are real editor content, like Devin's.
 
-The file hot-reloads on every save.
+## Install
 
-## Use
+**From Git:** in Hermes Desktop, open **Capabilities > Plugins > Install from Git** and paste `https://github.com/fquresh/hermes-quote-selection`.
 
-- Select text inside an agent reply.
-- Press **Cmd+Option+L** (Ctrl+Alt+L on Windows and Linux), or click the **Add to chat** popup.
-- The selection appears as a chip inside the input box, at the cursor. The caret lands right after it, so you can keep typing.
-- Add more quotes the same way. Each one gets its own chip, in the order you made them.
-- Hover a chip to see the full quote. Remove one with its **x**, or put the caret after it and press Backspace.
-- Press Enter to send. Each chip becomes `>` quote lines where it sits in the message. A chip alone also sends.
-- Chips live inside the chat's draft, so they belong to that chat and survive a switch away and back.
-- A message that starts with `/` (a slash command) still routes as a command.
-- With no selection, the shortcut only moves the cursor to the input box.
-- Text selected inside the input box is ignored.
+**By hand:** copy `plugin.js` into `~/.hermes/desktop-plugins/quote-selection/` (`%USERPROFILE%\.hermes\desktop-plugins\quote-selection\` on Windows), then run **Reload desktop plugins** from the command palette (Cmd+K). The file hot-reloads on save.
 
-To change the key, press Cmd+/ and look under **Composer** for "Quote selection into composer".
+## Using it
 
-### Why not plain Cmd+L?
+- Select text in an agent reply, then press **Cmd+Option+L** (Ctrl+Alt+L on Windows and Linux) or click **Add to chat**.
+- The chip lands at the cursor and the caret sits right after it, ready to type.
+- Stack as many quotes as you want - each is its own chip. Hover for the full text; remove one with the **x**, or put the caret after it and press Backspace.
+- Chips live in the chat's draft, so they survive switching away and back.
+- A draft that starts with `/` still goes through as a slash command.
+- Selections inside the input itself are ignored - quoting your own draft would just double it.
+- No selection? The key only moves the cursor to the input.
 
-Hermes already uses Cmd+L for terminal and file preview selections.
-Cmd+Shift+L toggles the browser.
-Ctrl+L would break "clear screen" in the terminal.
+**Why not plain Cmd+L?** It's taken - terminal and file-preview selections use it, Cmd+Shift+L toggles the browser, and Ctrl+L would eat "clear screen" in the terminal. Rebind under **Composer** in the Cmd+/ shortcuts panel.
 
-## Update safety
+## How it works
 
-| Depends on | Risk | If it breaks |
-| --- | --- | --- |
-| Plugin SDK: `KEYBINDS_AREA`, `host.notify`, `ctx.*` | Low (public API) | The plugin does not load and shows an error toast that names the missing part. |
-| App markup: `data-slot="composer-rich-input"` and the `data-ref-text` chip contract | Medium (internal) | Quotes insert as plain `>` text through `host.composer.insertText`, and one warning toast appears. |
-| App markup: `data-slot="aui_assistant-message-content"` | Medium (internal) | The popup shows for any selection outside an input, and one warning toast appears. |
-| `mod+alt+l` stays free | Low | A new built-in shortcut on that key wins. Rebind with Cmd+/. |
+The composer is a `contenteditable` that already understands inline chips: `@file:` refs are `contenteditable=false` spans whose `data-ref-text` gets emitted verbatim into the draft. This plugin builds the same shape - a span whose `data-ref-text` holds the blockquoted text - so the app's own serializer sends `> ` lines on submit. No plugin state, no send middleware: the chip *is* the quote.
 
-## Privacy and security
+Two details worth knowing:
 
-- The plugin makes no network requests.
-- It stores nothing. It uses no `localStorage` and no plugin storage. A quote lives in the chat's draft, not in the plugin.
-- Selected text goes only into your own chat input. Nothing is sent until you press Enter.
-- It builds its popup and chips with `textContent`, never `innerHTML`.
-- Quotes are inert text. Hermes turns `@file:`, `@url:`, and other `@kind:` text into live attachments. Agent output can contain such text, for example from a prompt-injected web page. The plugin puts a zero-width space after each `@kind:`, so a quote never attaches a file by accident — even when a draft repaint re-scans the text.
-- It imports only `@hermes/plugin-sdk`.
+- **Blank lines are load-bearing.** In Markdown, `> a` followed by `b` is one quote (lazy continuation), so the ref text is padded with newlines to keep typed text out of the quote.
+- **`@` defusing.** Agent output can contain `@file:`-style text, including injected paths, and Hermes would happily arm it as a live attachment when it re-scans the draft. A zero-width space after each `@kind:` keeps quotes inert.
+
+The DOM work depends on internal markup (`data-slot="composer-rich-input"` for the editor, `aui_assistant-message-content` for reply bounds), so an app update can break it. The plugin checks at load and degrades loudly instead of silently: a missing SDK piece refuses to register with an error toast, a renamed composer falls back to plain `> ` text through `insertText`, and a renamed reply slot widens the popup to any selection - each with one warning.
+
+## Privacy
+
+No network, no storage, no telemetry. Selected text goes only into your own input, and nothing is sent until you press Enter. Everything is built with `textContent`, never `innerHTML`.
 
 ## Develop
 
@@ -82,14 +63,11 @@ npm run check
 npm test
 ```
 
-The tests run the plugin in jsdom with a fake SDK.
-They cover the popup, the shortcut, inline chips, multi-pane targeting, the markup fallbacks, and the SDK self-check.
+The tests run `plugin.js` in jsdom with a fake SDK and cover the popup, the shortcut, chip insertion and removal, multi-pane targeting, the markup fallbacks, and the SDK self-check.
 
 ## See also
 
-- [pwwang/hermes-quote-comment](https://github.com/pwwang/hermes-quote-comment): right-click a selection to quote it with a comment.
-  Use it if you want a note attached to each quote.
-  This plugin focuses on a one-key quote, like Cmd+L in Devin.
+[pwwang/hermes-quote-comment](https://github.com/pwwang/hermes-quote-comment) - quote a selection via right-click with a comment attached. This plugin is the one-key, Devin-style version.
 
 ## License
 
