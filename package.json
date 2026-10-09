@@ -1,0 +1,15 @@
+{
+  "name": "quote-selection",
+  "version": "1.0.0",
+  "description": "Hermes Desktop plugin: quote selected agent output into the chat input, like Cmd+L in Devin.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "check": "node --check plugin.js",
+    "test": "node test/plugin.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1"
+  }
+}
