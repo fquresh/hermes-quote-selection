@@ -2,7 +2,10 @@
 // like Cmd+L in Devin. Plain Cmd+L stays with the app (terminal and file
 // preview selections, focus composer), so this plugin uses a separate chord.
 // A selection inside an agent reply also shows an "Add to chat" popup.
-import { host, KEYBINDS_AREA } from '@hermes/plugin-sdk'
+// A quote shows as a chip above the input; on send, a composer middleware
+// turns the chips into a Markdown blockquote ahead of the typed message.
+import { atom, Codicon, COMPOSER_AREAS, host, KEYBINDS_AREA, useValue } from '@hermes/plugin-sdk'
+import { jsx, jsxs } from 'react/jsx-runtime'
 
 const EDITABLE = '[contenteditable="true"], input, textarea'
 // App markup, not SDK surface. If an update renames this slot, the popup falls
@@ -18,7 +21,12 @@ const POPUP_GAP = 6
 const missingSdk = ctx =>
   [
     ['KEYBINDS_AREA', typeof KEYBINDS_AREA === 'string'],
-    ['host.composer.insertText', typeof host?.composer?.insertText === 'function'],
+    ['COMPOSER_AREAS.top', typeof COMPOSER_AREAS?.top === 'string'],
+    ['COMPOSER_AREAS.middleware', typeof COMPOSER_AREAS?.middleware === 'string'],
+    ['atom', typeof atom === 'function'],
+    ['useValue', typeof useValue === 'function'],
+    ['Codicon', typeof Codicon === 'function'],
+    ['host.state.focusedSessionId', typeof host?.state?.focusedSessionId?.get === 'function'],
     ['host.composer.focus', typeof host?.composer?.focus === 'function'],
     ['host.notify', typeof host?.notify === 'function'],
     ['ctx.addEventListener', typeof ctx.addEventListener === 'function'],
@@ -56,22 +64,116 @@ const selectedChatText = () => {
   return selection.toString()
 }
 
-const quoteSelection = async () => {
+// Pending quotes per chat: { [sessionKey]: [{ id, text }] }. A new chat has no
+// session id until its first send, so it keys as 'new' until then.
+const $quotes = atom({})
+const NEW_CHAT = 'new'
+let nextQuoteId = 0
+
+const sessionKey = sessionId => sessionId ?? NEW_CHAT
+
+const setQuotes = (key, list) => {
+  const { [key]: _old, ...rest } = $quotes.get()
+
+  $quotes.set(list.length ? { ...rest, [key]: list } : rest)
+}
+
+const addQuote = text => {
+  const key = sessionKey(host.state.focusedSessionId.get())
+
+  setQuotes(key, [...($quotes.get()[key] ?? []), { id: ++nextQuoteId, text: text.trim() }])
+}
+
+const removeQuote = (key, id) => setQuotes(key, ($quotes.get()[key] ?? []).filter(q => q.id !== id))
+
+const quoteSelection = () => {
   const text = selectedChatText()
 
   if (text.trim()) {
-    const inserted = await host.composer.insertText(null, quote(text), { mode: 'block' })
-
-    if (!inserted) {
-      host.notify({ kind: 'warning', message: 'No open chat input to quote into.' })
-
-      return
-    }
-
+    addQuote(text)
     window.getSelection()?.removeAllRanges()
   }
 
   host.composer.focus(null)
+}
+
+// Slash commands only route when they lead the message, so a quote must not
+// be put in front of one; the chips stay pending for the next normal send.
+const quoteMiddleware = {
+  handler: draft => {
+    const key = sessionKey(host.state.focusedSessionId.get())
+    const pending = $quotes.get()[key]
+
+    if (!pending?.length || draft.text.trimStart().startsWith('/')) {
+      return draft
+    }
+
+    setQuotes(key, [])
+
+    const quotes = pending.map(q => quote(q.text)).join('\n\n')
+
+    return { ...draft, text: draft.text.trim() ? `${quotes}\n\n${draft.text}` : quotes }
+  }
+}
+
+const chipStyle = {
+  alignItems: 'center',
+  background: 'color-mix(in srgb, var(--ui-accent) 22%, transparent)',
+  border: '1px solid color-mix(in srgb, var(--ui-accent) 35%, transparent)',
+  borderRadius: '6px',
+  color: 'var(--ui-text-primary)',
+  display: 'inline-flex',
+  font: '500 12px/1.4 system-ui, sans-serif',
+  gap: '6px',
+  maxWidth: '320px',
+  padding: '2px 4px 2px 7px'
+}
+
+const labelStyle = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+
+const removeStyle = {
+  background: 'none',
+  border: 'none',
+  color: 'var(--ui-text-tertiary)',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  padding: '0 2px'
+}
+
+const QuoteChip = ({ quote: q, sessionKey: key }) =>
+  jsxs('span', {
+    'data-quote-chip': '',
+    style: chipStyle,
+    title: q.text,
+    children: [
+      jsx(Codicon, { 'aria-hidden': true, name: 'quote', size: 12 }),
+      jsx('span', { style: labelStyle, children: q.text.replace(/\s+/g, ' ') }),
+      jsx('button', {
+        'aria-label': 'Remove quote',
+        onClick: () => removeQuote(key, q.id),
+        style: removeStyle,
+        type: 'button',
+        children: jsx(Codicon, { 'aria-hidden': true, name: 'close', size: 12 })
+      })
+    ]
+  })
+
+// Every mounted composer renders this slot; it shows the focused chat's
+// quotes, which is the composer the user is typing in.
+const QuoteChips = () => {
+  const quotes = useValue($quotes)
+  const key = sessionKey(useValue(host.state.focusedSessionId))
+  const list = quotes[key] ?? []
+
+  if (!list.length) {
+    return null
+  }
+
+  return jsx('div', {
+    'data-quote-chips': '',
+    style: { display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '6px 8px 0' },
+    children: list.map(q => jsx(QuoteChip, { quote: q, sessionKey: key }, q.id))
+  })
 }
 
 // Strict mode: both ends of the selection must sit in the same agent reply, so
@@ -163,7 +265,7 @@ const registerPopup = ctx => {
 
   const popup = createPopup(() => {
     hide()
-    void quoteSelection()
+    quoteSelection()
   })
 
   const show = range => {
@@ -228,9 +330,13 @@ export default {
         label: 'Quote selection into composer',
         category: 'composer',
         defaults: ['mod+alt+l'],
-        run: () => void quoteSelection()
+        run: quoteSelection
       }
     })
+
+    ctx.register({ id: 'chips', area: COMPOSER_AREAS.top, render: () => jsx(QuoteChips, {}) })
+    ctx.register({ id: 'send', area: COMPOSER_AREAS.middleware, data: quoteMiddleware })
+    ctx.onDispose(() => $quotes.set({}))
 
     registerPopup(ctx)
   }

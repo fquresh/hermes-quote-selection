@@ -2,7 +2,8 @@
 
 A desktop plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/).
 Select part of an agent reply, then press **Cmd+Option+L** or click **Add to chat**.
-The text lands in the chat input as a Markdown quote, like Cmd+L in Devin.
+The quote appears as a chip above the chat input, like Cmd+L in Devin.
+When you send, the chips become a Markdown quote ahead of your message.
 
 ## Installation
 
@@ -38,7 +39,12 @@ The file hot-reloads on every save.
 
 - Select text inside an agent reply.
 - Press **Cmd+Option+L** (Ctrl+Alt+L on Windows and Linux), or click the **Add to chat** popup.
-- The selection goes into the input box as `> quote`, and the cursor moves after it.
+- The selection appears as a chip above the input box, and the cursor moves to the input box.
+- Add more quotes the same way. Each one gets its own chip. Hover a chip to see the full text, or click its **x** to remove it.
+- Type your question and press Enter. The message is sent as each quote in `>` lines, then your question.
+- Chips belong to the chat you made them in. Switch chats and they wait for you.
+- A message that starts with `/` (a slash command) is sent untouched, and the chips stay for your next message.
+- Type at least one character before you send. Hermes does not send an empty input box, even with chips.
 - With no selection, the shortcut only moves the cursor to the input box.
 - Text selected inside the input box is ignored.
 
@@ -54,7 +60,7 @@ Ctrl+L would break "clear screen" in the terminal.
 
 | Depends on | Risk | If it breaks |
 | --- | --- | --- |
-| Plugin SDK: `KEYBINDS_AREA`, `host.composer.*`, `ctx.*` | Low (public API) | The plugin does not load and shows an error toast that names the missing part. |
+| Plugin SDK: `KEYBINDS_AREA`, `COMPOSER_AREAS`, `host.state.focusedSessionId`, `host.composer.focus`, `ctx.*` | Low (public API) | The plugin does not load and shows an error toast that names the missing part. |
 | App markup: `data-slot="aui_assistant-message-content"` | Medium (internal) | The popup shows for any selection outside an input, and one warning toast appears. |
 | `mod+alt+l` stays free | Low | A new built-in shortcut on that key wins. Rebind with Cmd+/. |
 
