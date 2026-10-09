@@ -1,21 +1,38 @@
-# quote-selection
+# hermes-quote-selection
 
-A [Hermes Desktop](https://github.com/NousResearch/hermes-agent) plugin.
+A desktop plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/).
 Select part of an agent reply, then press **Cmd+Option+L** or click **Add to chat**.
 The text lands in the chat input as a Markdown quote, like Cmd+L in Devin.
 
-## Install
+## Installation
 
-In Hermes Desktop, open **Capabilities > Plugins** and install from Git with this URL:
+### Option 1: Install from Git
+
+In Hermes Desktop, open **Capabilities > Plugins > Install from Git** and paste:
 
 ```
-https://github.com/fquresh/quote-selection
+https://github.com/fquresh/hermes-quote-selection
 ```
 
-Or copy `plugin.js` by hand to `~/.hermes/desktop-plugins/quote-selection/plugin.js`.
-The folder name must be `quote-selection`, because it must match the plugin id.
-Hermes hot-reloads the file.
-If it does not appear, press Cmd+K and run **Reload desktop plugins**.
+### Option 2: Copy by hand
+
+1. Create the plugin folder. The folder name matches the plugin id:
+
+   ```bash
+   # macOS / Linux: ~/.hermes/desktop-plugins/quote-selection/
+   # Windows: %USERPROFILE%\.hermes\desktop-plugins\quote-selection\
+   mkdir -p ~/.hermes/desktop-plugins/quote-selection
+   ```
+
+2. Copy `plugin.js` into it:
+
+   ```bash
+   cp plugin.js ~/.hermes/desktop-plugins/quote-selection/
+   ```
+
+3. In Hermes Desktop, open the command palette (Cmd+K / Ctrl+K) and run **Reload desktop plugins**.
+
+The file hot-reloads on every save.
 
 ## Use
 
@@ -60,6 +77,12 @@ npm test
 
 The tests run the plugin in jsdom with a fake SDK.
 They cover the popup, the shortcut, the markup fallback, and the SDK self-check.
+
+## See also
+
+- [pwwang/hermes-quote-comment](https://github.com/pwwang/hermes-quote-comment): right-click a selection to quote it with a comment.
+  Use it if you want a note attached to each quote.
+  This plugin focuses on a one-key quote, like Cmd+L in Devin.
 
 ## License
 

@@ -1,5 +1,5 @@
 {
-  "name": "quote-selection",
+  "name": "hermes-quote-selection",
   "version": "1.0.0",
   "description": "Hermes Desktop plugin: quote selected agent output into the chat input, like Cmd+L in Devin.",
   "private": true,
