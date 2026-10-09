@@ -2,8 +2,8 @@
 
 A desktop plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/).
 Select part of an agent reply, then press **Cmd+Option+L** or click **Add to chat**.
-The quote appears as a chip above the chat input, like Cmd+L in Devin.
-When you send, the chips become a Markdown quote ahead of your message.
+The quote appears as a chip inside the chat input, inline with your text, like Cmd+L in Devin.
+When you send, the chips become Markdown `>` quote lines where they sit in the message.
 
 ## Installation
 
@@ -39,12 +39,12 @@ The file hot-reloads on every save.
 
 - Select text inside an agent reply.
 - Press **Cmd+Option+L** (Ctrl+Alt+L on Windows and Linux), or click the **Add to chat** popup.
-- The selection appears as a chip above the input box, and the cursor moves to the input box.
-- Add more quotes the same way. Each one gets its own chip. Hover a chip to see the full text, or click its **x** to remove it.
-- Type your question and press Enter. The message is sent as each quote in `>` lines, then your question.
-- Chips belong to the chat you made them in. Switch chats and they wait for you.
-- A message that starts with `/` (a slash command) is sent untouched, and the chips stay for your next message.
-- Type at least one character before you send. Hermes does not send an empty input box, even with chips.
+- The selection appears as a chip inside the input box, at the cursor. The caret lands right after it, so you can keep typing.
+- Add more quotes the same way. Each one gets its own chip, in the order you made them.
+- Hover a chip to see the full quote. Remove one with its **x**, or put the caret after it and press Backspace.
+- Press Enter to send. Each chip becomes `>` quote lines where it sits in the message. A chip alone also sends.
+- Chips live inside the chat's draft, so they belong to that chat and survive a switch away and back.
+- A message that starts with `/` (a slash command) still routes as a command.
 - With no selection, the shortcut only moves the cursor to the input box.
 - Text selected inside the input box is ignored.
 
@@ -60,17 +60,18 @@ Ctrl+L would break "clear screen" in the terminal.
 
 | Depends on | Risk | If it breaks |
 | --- | --- | --- |
-| Plugin SDK: `KEYBINDS_AREA`, `COMPOSER_AREAS`, `host.state.focusedSessionId`, `host.composer.focus`, `ctx.*` | Low (public API) | The plugin does not load and shows an error toast that names the missing part. |
+| Plugin SDK: `KEYBINDS_AREA`, `host.notify`, `ctx.*` | Low (public API) | The plugin does not load and shows an error toast that names the missing part. |
+| App markup: `data-slot="composer-rich-input"` and the `data-ref-text` chip contract | Medium (internal) | Quotes insert as plain `>` text through `host.composer.insertText`, and one warning toast appears. |
 | App markup: `data-slot="aui_assistant-message-content"` | Medium (internal) | The popup shows for any selection outside an input, and one warning toast appears. |
 | `mod+alt+l` stays free | Low | A new built-in shortcut on that key wins. Rebind with Cmd+/. |
 
 ## Privacy and security
 
 - The plugin makes no network requests.
-- It stores nothing. It uses no `localStorage` and no plugin storage.
+- It stores nothing. It uses no `localStorage` and no plugin storage. A quote lives in the chat's draft, not in the plugin.
 - Selected text goes only into your own chat input. Nothing is sent until you press Enter.
-- It builds its popup with `textContent`, never `innerHTML`.
-- Quotes are inert text. Hermes turns `@file:`, `@url:`, and other `@kind:` text into live attachments. Agent output can contain such text, for example from a prompt-injected web page. The plugin puts a zero-width space after each `@kind:`, so a quote never attaches a file by accident.
+- It builds its popup and chips with `textContent`, never `innerHTML`.
+- Quotes are inert text. Hermes turns `@file:`, `@url:`, and other `@kind:` text into live attachments. Agent output can contain such text, for example from a prompt-injected web page. The plugin puts a zero-width space after each `@kind:`, so a quote never attaches a file by accident — even when a draft repaint re-scans the text.
 - It imports only `@hermes/plugin-sdk`.
 
 ## Develop
@@ -82,7 +83,7 @@ npm test
 ```
 
 The tests run the plugin in jsdom with a fake SDK.
-They cover the popup, the shortcut, the markup fallback, and the SDK self-check.
+They cover the popup, the shortcut, inline chips, multi-pane targeting, the markup fallbacks, and the SDK self-check.
 
 ## See also
 

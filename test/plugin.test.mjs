@@ -1,42 +1,57 @@
-// Runs plugin.js in jsdom with a fake @hermes/plugin-sdk and a tiny JSX stub. `npm test`.
+// Runs plugin.js in jsdom with a fake @hermes/plugin-sdk. `npm test`.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import { JSDOM } from 'jsdom'
 
-const atom = initial => {
-  let value = initial
-  return { get: () => value, set: next => (value = next) }
-}
-
 const notes = []
+const inserts = []
 let focused = 0
-const focusedSessionId = atom('s1')
-const composer = { focus: () => focused++ }
 
 globalThis.__sdk = {
-  atom,
-  Codicon: function Codicon() {},
-  COMPOSER_AREAS: { top: 'composer.top', middleware: 'composer.middleware' },
-  host: { composer, notify: n => notes.push(n), state: { focusedSessionId } },
-  KEYBINDS_AREA: 'keybinds',
-  useValue: store => store.get()
+  host: {
+    composer: {
+      focus: () => focused++,
+      insertText: (id, text, opts) => {
+        inserts.push({ id, mode: opts?.mode, text })
+        return Promise.resolve(true)
+      }
+    },
+    notify: n => notes.push(n)
+  },
+  KEYBINDS_AREA: 'keybinds'
 }
-// Element objects instead of React: enough to call components and read props.
-const element = (type, props, key) => ({ key, props, type })
-globalThis.__jsx = { jsx: element, jsxs: element }
 
-const SDK_IMPORT = "import { atom, Codicon, COMPOSER_AREAS, host, KEYBINDS_AREA, useValue } from '@hermes/plugin-sdk'"
-const JSX_IMPORT = "import { jsx, jsxs } from 'react/jsx-runtime'"
+const SDK_IMPORT = "import { host, KEYBINDS_AREA } from '@hermes/plugin-sdk'"
 const source = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
-assert.ok(source.includes(SDK_IMPORT) && source.includes(JSX_IMPORT), 'plugin.js imports match this test')
-const stubbed = source
-  .replace(SDK_IMPORT, 'const { atom, Codicon, COMPOSER_AREAS, host, KEYBINDS_AREA, useValue } = globalThis.__sdk')
-  .replace(JSX_IMPORT, 'const { jsx, jsxs } = globalThis.__jsx')
+assert.ok(source.includes(SDK_IMPORT), 'plugin.js imports match this test')
+const stubbed = source.replace(SDK_IMPORT, 'const { host, KEYBINDS_AREA } = globalThis.__sdk')
 const plugin = (await import(`data:text/javascript,${encodeURIComponent(stubbed)}`)).default
 
 const rect = () => ({ top: 100, bottom: 120, left: 40, right: 200, width: 160, height: 20 })
 const tick = () => new Promise(resolve => setTimeout(resolve, 5))
+
+// The same walk the app does in composerPlainText: chips emit their
+// data-ref-text, <br> becomes a newline, everything else is text.
+const serialize = node => {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent || ''
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return ''
+  }
+
+  if (node.dataset.refText) {
+    return node.dataset.refText
+  }
+
+  if (node.tagName === 'BR') {
+    return '\n'
+  }
+
+  return Array.from(node.childNodes).map(serialize).join('')
+}
 
 // One fresh page and plugin load per scenario, like an app reload.
 const setup = html => {
@@ -66,23 +81,12 @@ const setup = html => {
   const byId = id => doc.getElementById(id)
   const area = name => contributions.find(c => c.area === name)
 
-  // Render the composer.top slot and return the chip elements it shows.
-  const chipElements = () => {
-    const root = area('composer.top').render()
-    const out = root.type(root.props)
-    return out ? out.props.children : []
-  }
-
   return {
+    chips: (editorId = 'composer') => [...byId(editorId).querySelectorAll('[data-quote-chip]')],
     contributions,
     dispose: () => disposers.forEach(fn => fn()),
+    draft: (editorId = 'composer') => serialize(byId(editorId)),
     popup: () => doc.querySelector('[data-quote-selection-popup]'),
-    chips: () => chipElements().map(chip => chip.props.quote.text),
-    removeChip: index => {
-      const chip = chipElements()[index]
-      chip.type(chip.props).props.children[2].props.onClick()
-    },
-    send: text => area('composer.middleware').data.handler({ text }).text,
     shortcut: () => area('keybinds').data.run(),
     select: (startId, endId = startId) => {
       const range = doc.createRange()
@@ -100,11 +104,14 @@ const setup = html => {
   }
 }
 
+// An emptied Hermes composer keeps one scaffolding <br> to hold its height.
 const CURRENT = `
-  <div data-message-id="u1"><p id="user">User question</p></div>
-  <div data-slot="aui_assistant-message-content"><p id="a">First line of the reply.</p><p id="b">Second line.</p></div>
-  <div id="sidebar">Sidebar text</div>
-  <div contenteditable="true" id="composer">draft</div>`
+  <div id="pane">
+    <div data-message-id="u1"><p id="user">User question</p></div>
+    <div data-slot="aui_assistant-message-content"><p id="a">First line of the reply.</p><p id="b">Second line.</p></div>
+    <div id="sidebar">Sidebar text</div>
+    <div contenteditable="true" data-slot="composer-rich-input" id="composer"><br></div>
+  </div>`
 
 // The same page after a hypothetical update renamed the reply slot.
 const RENAMED = CURRENT.replace('aui_assistant-message-content', 'aui_reply-body').replace(
@@ -112,12 +119,12 @@ const RENAMED = CURRENT.replace('aui_assistant-message-content', 'aui_reply-body
   '<div data-message-id="u2"><p id="user2">Follow-up</p></div><div id="sidebar">'
 )
 
-// Popup click: a chip appears, and the send turns it into a blockquote.
+// Popup click: an inline chip lands in the composer and the selection clears.
 {
   const p = setup(CURRENT)
   assert.equal(p.contributions.find(c => c.area === 'keybinds').data.defaults[0], 'mod+alt+l')
   assert.equal(p.popup().style.display, 'none', 'popup hidden at start')
-  assert.deepEqual(p.chips(), [], 'no chips at start')
+  assert.equal(p.chips().length, 0, 'no chips at start')
 
   p.select('a', 'b')
   await p.mouseup()
@@ -125,67 +132,62 @@ const RENAMED = CURRENT.replace('aui_assistant-message-content', 'aui_reply-body
 
   p.popup().click()
   // jsdom joins <p> text without a newline; Chromium adds one per block.
-  assert.deepEqual(p.chips(), ['First line of the reply.Second line.'], 'one chip')
+  assert.equal(p.chips().length, 1, 'one chip in the composer')
+  assert.equal(p.chips()[0].contentEditable, 'false', 'chip is an atomic island')
   assert.equal(p.popup().style.display, 'none', 'popup hidden after click')
-  assert.equal(window.getSelection().isCollapsed, true, 'selection cleared')
-  assert.equal(focused, 1, 'cursor moved to the input')
+  const range = window.getSelection().getRangeAt(0)
+  assert.equal(range.collapsed, true, 'a collapsed caret sits after the chip')
+  assert.equal(range.startContainer.id, 'composer', 'caret lives in the composer')
 
-  assert.equal(p.send('What does this mean?'), '> First line of the reply.Second line.\n\nWhat does this mean?')
-  assert.deepEqual(p.chips(), [], 'chips cleared after send')
-  assert.equal(p.send('plain'), 'plain', 'no chips, no change')
+  const draft = p.draft()
+  // Empty editor scaffold replaced; chip payload plus the caret text node.
+  assert.equal(draft, '\n> First line of the reply.Second line.\n\n ', 'draft holds the blockquote')
+  assert.ok(draft.endsWith('\n\n '), 'trailing blank line keeps typed text out of the quote')
   p.dispose()
 }
 
-// Several quotes, in order, then the question.
+// Several quotes keep their order, inline where they were added.
 {
   const p = setup(CURRENT)
   p.select('a')
   p.shortcut()
   p.select('b')
   p.shortcut()
-  assert.deepEqual(p.chips(), ['First line of the reply.', 'Second line.'])
-  assert.equal(p.send('Compare these'), '> First line of the reply.\n\n> Second line.\n\nCompare these')
+  assert.equal(p.chips().length, 2)
+  assert.equal(p.draft(), '\n> First line of the reply.\n\n \n> Second line.\n\n ')
   p.dispose()
 }
 
-// The x button removes a chip.
+// The x button removes the chip and its quote text.
 {
   const p = setup(CURRENT)
   p.select('a')
   p.shortcut()
-  p.removeChip(0)
-  assert.deepEqual(p.chips(), [], 'chip removed')
-  assert.equal(p.send('hi'), 'hi', 'removed chip is not sent')
+  assert.match(p.draft(), /> First line/)
+
+  p.chips()[0].querySelector('button').dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+  assert.equal(p.chips().length, 0, 'chip removed')
+  assert.equal(p.draft(), ' ', 'only the caret text node remains')
   p.dispose()
 }
 
-// A slash command is sent untouched and the chip waits for the next message.
+// A quote lands next to text already in the input, fenced off by newlines.
 {
-  const p = setup(CURRENT)
+  const p = setup(CURRENT.replace('<br>', 'What does this mean?'))
   p.select('a')
   p.shortcut()
-  assert.equal(p.send('/help'), '/help')
-  assert.deepEqual(p.chips(), ['First line of the reply.'], 'chip kept after a slash command')
-  assert.equal(p.send('ok'), '> First line of the reply.\n\nok')
+  assert.equal(p.draft(), 'What does this mean?\n> First line of the reply.\n\n ')
   p.dispose()
 }
 
-// Quotes belong to the chat they were made in. A new chat keys as "new".
+// With nothing selected, the chord just moves the cursor to the input.
 {
   const p = setup(CURRENT)
-  p.select('a')
+  window.getSelection().removeAllRanges()
   p.shortcut()
-  focusedSessionId.set('s2')
-  assert.deepEqual(p.chips(), [], 'other chat shows no chips')
-  assert.equal(p.send('hi'), 'hi', 'other chat sends no quote')
-  focusedSessionId.set(null)
-  p.select('b')
-  p.shortcut()
-  assert.equal(p.send('new chat'), '> Second line.\n\nnew chat')
-  focusedSessionId.set('s1')
-  assert.deepEqual(p.chips(), ['First line of the reply.'], 'first chat still has its chip')
+  assert.equal(p.chips().length, 0, 'no chip')
+  assert.equal(window.getSelection().getRangeAt(0).commonAncestorContainer.id, 'composer', 'caret at composer')
   p.dispose()
-  assert.deepEqual(p.chips(), [], 'dispose clears pending quotes')
 }
 
 // Selections that must not quote.
@@ -210,33 +212,77 @@ const RENAMED = CURRENT.replace('aui_assistant-message-content', 'aui_reply-body
   await p.mouseup()
   assert.equal(p.popup().style.display, 'none', 'no popup in the composer')
   p.shortcut()
-  assert.deepEqual(p.chips(), [], 'shortcut ignores a composer selection')
+  assert.equal(p.chips().length, 0, 'shortcut ignores a composer selection')
   assert.equal(notes.length, 0, 'no warnings with current markup')
 
   p.dispose()
   assert.equal(p.popup(), null, 'popup removed on dispose')
 }
 
-// Attachment refs in agent output are quoted as inert text.
+// Attachment refs in agent output are quoted as inert text, even after the
+// composer would re-scan the draft text for @kind: tokens.
 {
   const p = setup(`
-    <div data-slot="aui_assistant-message-content"><p id="r">Run @file:~/.ssh/id_rsa and @URL:https://x.test, mail a@b.com</p></div>`)
+    <div id="pane">
+      <div data-slot="aui_assistant-message-content"><p id="r">Run @file:~/.ssh/id_rsa and @URL:https://x.test, mail a@b.com</p></div>
+      <div contenteditable="true" data-slot="composer-rich-input" id="composer"><br></div>
+    </div>`)
   p.select('r')
   p.shortcut()
-  const text = p.send('?')
+  const text = p.draft()
   // Same pattern the Hermes composer and transcript use to recognise refs.
   assert.equal(/@(file|folder|url|image|tool|terminal|session):/i.test(text), false, 'no live @kind: ref survives')
   assert.equal(
     text.replaceAll('\u200B', ''),
-    '> Run @file:~/.ssh/id_rsa and @URL:https://x.test, mail a@b.com\n\n?',
+    '\n> Run @file:~/.ssh/id_rsa and @URL:https://x.test, mail a@b.com\n\n ',
     'text reads the same'
   )
   assert.ok(text.includes('a@b.com'), 'plain emails are untouched')
   p.dispose()
 }
 
+// Two panes: the chip goes to the composer that owns the selected message.
+{
+  const p = setup(`
+    <div id="left">
+      <div data-slot="aui_assistant-message-content"><p id="la">left reply</p></div>
+      <div contenteditable="true" data-slot="composer-rich-input" id="left-composer"><br></div>
+    </div>
+    <div id="right">
+      <div data-slot="aui_assistant-message-content"><p id="ra">right reply</p></div>
+      <div contenteditable="true" data-slot="composer-rich-input" id="right-composer"><br></div>
+    </div>`)
+  p.select('ra')
+  p.shortcut()
+  assert.equal(p.chips('right-composer').length, 1, 'chip landed in the right pane')
+  assert.equal(p.chips('left-composer').length, 0, 'left pane untouched')
+  p.dispose()
+}
+
+// Unknown composer markup: quotes degrade to plain text through the SDK and
+// warn once instead of breaking silently.
+{
+  notes.length = 0
+  inserts.length = 0
+  const p = setup(`
+    <div data-slot="aui_assistant-message-content"><p id="r">A reply.</p></div>`)
+  p.select('r')
+  p.shortcut()
+  assert.equal(inserts.length, 1, 'fell back to insertText')
+  assert.equal(inserts[0].text, '\n> A reply.\n\n')
+  assert.equal(inserts[0].mode, 'inline')
+  assert.equal(notes.length, 1, 'warned once')
+  assert.match(notes[0].message, /COMPOSER_INPUT/)
+
+  p.select('r')
+  p.shortcut()
+  assert.equal(notes.length, 1, 'still only one warning')
+  p.dispose()
+}
+
 // Renamed markup: fallback mode and one warning.
 {
+  notes.length = 0
   const p = setup(RENAMED)
 
   p.select('sidebar')
@@ -251,7 +297,7 @@ const RENAMED = CURRENT.replace('aui_assistant-message-content', 'aui_reply-body
   assert.equal(notes.length, 1, 'warns only once per load')
 
   p.popup().click()
-  assert.deepEqual(p.chips(), ['First line of the reply.'], 'fallback still quotes')
+  assert.equal(p.chips().length, 1, 'fallback still quotes')
 
   p.select('composer')
   await p.mouseup()
@@ -270,18 +316,35 @@ const RENAMED = CURRENT.replace('aui_assistant-message-content', 'aui_reply-body
   p.dispose()
 }
 
-// SDK break: the plugin refuses to load and says why.
+// SDK break: the plugin refuses to load and says why. The check runs on the
+// live host object, so a missing piece is deleted from the fake for the test.
+// With host.notify gone, the error can only reach the console.
 {
   notes.length = 0
-  const saved = globalThis.__sdk.COMPOSER_AREAS.middleware
-  delete globalThis.__sdk.COMPOSER_AREAS.middleware
+  const errors = []
+  const consoleError = console.error
+  console.error = (...args) => errors.push(args.join(' '))
+  const saved = globalThis.__sdk.host.notify
+  delete globalThis.__sdk.host.notify
   const p = setup(CURRENT)
   assert.equal(p.contributions.length, 0, 'nothing registered')
   assert.equal(p.popup(), null, 'no popup injected')
-  assert.equal(notes.length, 1)
-  assert.equal(notes[0].kind, 'error')
-  assert.match(notes[0].message, /COMPOSER_AREAS\.middleware/)
-  globalThis.__sdk.COMPOSER_AREAS.middleware = saved
+  assert.equal(errors.length, 1, 'fell back to console.error')
+  assert.match(errors[0], /host\.notify/)
+  console.error = consoleError
+  globalThis.__sdk.host.notify = saved
+}
+
+// Missing composer host: a warning, but inline chips still register.
+{
+  notes.length = 0
+  const saved = globalThis.__sdk.host.composer
+  globalThis.__sdk.host.composer = {}
+  const p = setup(CURRENT)
+  assert.ok(p.contributions.find(c => c.area === 'keybinds'), 'keybind still registered')
+  assert.equal(notes.filter(n => n.kind === 'warning').length, 1, 'warned about host.composer')
+  globalThis.__sdk.host.composer = saved
+  p.dispose()
 }
 
 console.log('All tests passed.')

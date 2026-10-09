@@ -2,10 +2,11 @@
 // like Cmd+L in Devin. Plain Cmd+L stays with the app (terminal and file
 // preview selections, focus composer), so this plugin uses a separate chord.
 // A selection inside an agent reply also shows an "Add to chat" popup.
-// A quote shows as a chip above the input; on send, a composer middleware
-// turns the chips into a Markdown blockquote ahead of the typed message.
-import { atom, Codicon, COMPOSER_AREAS, host, KEYBINDS_AREA, useValue } from '@hermes/plugin-sdk'
-import { jsx, jsxs } from 'react/jsx-runtime'
+// The quote lands as a chip INSIDE the input, inline with the text, so the
+// cursor can sit right next to it. The chip is a contenteditable=false span
+// whose data-ref-text holds the Markdown blockquote; the composer's own draft
+// serializer emits it as `>` lines on send, exactly like `@file:` chips.
+import { host, KEYBINDS_AREA } from '@hermes/plugin-sdk'
 
 const EDITABLE = '[contenteditable="true"], input, textarea'
 // App markup, not SDK surface. If an update renames this slot, the popup falls
@@ -14,20 +15,18 @@ const AGENT_REPLY = '[data-slot="aui_assistant-message-content"]'
 // Also app markup: every chat message carries it. Two or more messages on
 // screen with no agent reply match means the reply selector went stale.
 const CHAT_MESSAGE = '[data-message-id]'
+// The composer's contenteditable. Same caveat: internal markup. If it cannot
+// be found, quotes fall back to host.composer.insertText (plain `>` text) and
+// a warning toast shows once per load.
+const COMPOSER_INPUT = '[data-slot="composer-rich-input"]'
 const POPUP_GAP = 6
+const LABEL_MAX = 48
 
 // Each app update reloads the plugin, so this runs once per new version and
 // turns a silent SDK break into a visible one.
 const missingSdk = ctx =>
   [
     ['KEYBINDS_AREA', typeof KEYBINDS_AREA === 'string'],
-    ['COMPOSER_AREAS.top', typeof COMPOSER_AREAS?.top === 'string'],
-    ['COMPOSER_AREAS.middleware', typeof COMPOSER_AREAS?.middleware === 'string'],
-    ['atom', typeof atom === 'function'],
-    ['useValue', typeof useValue === 'function'],
-    ['Codicon', typeof Codicon === 'function'],
-    ['host.state.focusedSessionId', typeof host?.state?.focusedSessionId?.get === 'function'],
-    ['host.composer.focus', typeof host?.composer?.focus === 'function'],
     ['host.notify', typeof host?.notify === 'function'],
     ['ctx.addEventListener', typeof ctx.addEventListener === 'function'],
     ['ctx.setTimeout', typeof ctx.setTimeout === 'function'],
@@ -39,16 +38,22 @@ const missingSdk = ctx =>
 // The composer turns `@file:` / `@url:` / `@terminal:` (and other `@kind:`)
 // text into live attachment refs. A quote must stay inert text: agent output
 // can carry a prompt-injected `@file:~/.ssh/id_rsa`, and quoting it must not
-// arm an attachment. A zero-width space after `@` keeps the text readable but
-// breaks the ref pattern.
+// arm an attachment. This matters twice: at send, and again if Hermes repaints
+// the draft (its chip hydration re-scans the whole text). A zero-width space
+// after `@` keeps the text readable but breaks the ref pattern.
 const defuseRefs = text => text.replace(/@(?=[a-z]+:)/gi, '@\u200B')
 
-const quote = text =>
+const quoteBlock = text =>
   defuseRefs(text)
     .trim()
     .split(/\r?\n/)
     .map(line => (line.trim() ? `> ${line}` : '>'))
     .join('\n')
+
+// What a chip serializes to inside the draft. The blank lines are load-bearing:
+// without them, text typed next to the chip would merge into the quote (a line
+// after `> a` is a lazy continuation in Markdown, not a new paragraph).
+const chipText = text => `\n${quoteBlock(text)}\n\n`
 
 const elementOf = node => (node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement)
 
@@ -64,116 +69,212 @@ const selectedChatText = () => {
   return selection.toString()
 }
 
-// Pending quotes per chat: { [sessionKey]: [{ id, text }] }. A new chat has no
-// session id until its first send, so it keys as 'new' until then.
-const $quotes = atom({})
-const NEW_CHAT = 'new'
-let nextQuoteId = 0
+// The composer that owns the chat the selection sits in. Hermes tiles put
+// several composers on screen, so climb the selection's ancestors until exactly
+// one composer is in scope; the climb returns null the moment it crosses a
+// boundary shared by two panes, and a single-editor page needs no climb at all.
+const composerFor = () => {
+  const selection = window.getSelection()
+  let el = elementOf(selection?.anchorNode)
 
-const sessionKey = sessionId => sessionId ?? NEW_CHAT
+  while (el && el !== document.documentElement) {
+    const found = el.querySelectorAll?.(COMPOSER_INPUT)
 
-const setQuotes = (key, list) => {
-  const { [key]: _old, ...rest } = $quotes.get()
+    if (found?.length === 1) {
+      return found[0]
+    }
 
-  $quotes.set(list.length ? { ...rest, [key]: list } : rest)
+    if (found?.length > 1) {
+      return null
+    }
+
+    el = el.parentElement
+  }
+
+  const all = document.querySelectorAll(COMPOSER_INPUT)
+
+  return all.length === 1 ? all[0] : null
 }
 
-const addQuote = text => {
-  const key = sessionKey(host.state.focusedSessionId.get())
+const fireEdit = (editor, type) => {
+  // Build events from the editor's own window: cross-realm Event objects fail
+  // dispatchEvent's instanceof check.
+  const win = editor.ownerDocument?.defaultView ?? window
 
-  setQuotes(key, [...($quotes.get()[key] ?? []), { id: ++nextQuoteId, text: text.trim() }])
+  try {
+    editor.dispatchEvent(new win.InputEvent(type, { bubbles: true, inputType: 'insertText' }))
+  } catch {
+    editor.dispatchEvent(new win.Event(type, { bubbles: true }))
+  }
 }
 
-const removeQuote = (key, id) => setQuotes(key, ($quotes.get()[key] ?? []).filter(q => q.id !== id))
+const caretAfter = node => {
+  const range = document.createRange()
+
+  range.setStartAfter(node)
+  range.collapse(true)
+
+  const selection = window.getSelection()
+
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+}
+
+const caretEnd = editor => {
+  const range = document.createRange()
+
+  range.selectNodeContents(editor)
+  range.collapse(false)
+
+  const selection = window.getSelection()
+
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+}
+
+const quoteIcon = () => {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('fill', 'currentColor')
+  svg.setAttribute('width', '12')
+  svg.setAttribute('height', '12')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.style.flexShrink = '0'
+
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+
+  path.setAttribute('d', 'M6 17h3l2-4V7H5v6h3l-2 4zm8 0h3l2-4V7h-6v6h3l-2 4z')
+  svg.append(path)
+
+  return svg
+}
+
+// A chip is a contenteditable=false span in the editor, the same shape the app
+// uses for `@file:` refs, so the built-in machinery does the work: one backspace
+// deletes it atomically, the draft serializer emits dataset.refText verbatim,
+// and the empty-state placeholder clears itself.
+const buildChip = (editor, text) => {
+  const chip = document.createElement('span')
+
+  chip.contentEditable = 'false'
+  chip.dataset.quoteChip = ''
+  chip.dataset.refText = chipText(text)
+  chip.title = text.trim()
+
+  Object.assign(chip.style, {
+    alignItems: 'center',
+    background: 'color-mix(in srgb, var(--ui-accent) 22%, transparent)',
+    border: '1px solid color-mix(in srgb, var(--ui-accent) 35%, transparent)',
+    borderRadius: '6px',
+    color: 'var(--ui-text-primary)',
+    cursor: 'default',
+    display: 'inline-flex',
+    font: '500 0.85em/1.5 system-ui, sans-serif',
+    gap: '0.3em',
+    marginInline: '0.1em',
+    maxWidth: '26em',
+    padding: '0 0.2em 0 0.45em',
+    verticalAlign: '-0.12em'
+  })
+
+  const label = document.createElement('span')
+  const flat = text.trim().replace(/\s+/g, ' ')
+
+  label.textContent = flat.length > LABEL_MAX ? `${flat.slice(0, LABEL_MAX).trimEnd()}…` : flat
+  Object.assign(label.style, { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+
+  const remove = document.createElement('button')
+
+  remove.type = 'button'
+  remove.textContent = '×'
+  remove.setAttribute('aria-label', 'Remove quote')
+  Object.assign(remove.style, {
+    background: 'none',
+    border: 'none',
+    color: 'var(--ui-text-tertiary)',
+    cursor: 'pointer',
+    font: 'inherit',
+    padding: '0 0.15em'
+  })
+  // mousedown steals focus from the editor before click can run; suppress it.
+  remove.addEventListener('mousedown', event => event.preventDefault())
+  remove.addEventListener('click', () => {
+    chip.remove()
+    fireEdit(editor, 'input')
+  })
+
+  chip.append(quoteIcon(), label, remove)
+
+  return chip
+}
+
+const insertQuoteChip = (editor, text) => {
+  const chip = buildChip(editor, text)
+  // A landing text node so the caret has somewhere to sit after the chip and
+  // typed text does not glue onto it.
+  const space = document.createTextNode(' ')
+  const fragment = document.createDocumentFragment()
+
+  fragment.append(chip, space)
+
+  const selection = window.getSelection()
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null
+  const inside = range && editor.contains(range.commonAncestorContainer) ? range : null
+
+  if (inside) {
+    inside.deleteContents()
+    inside.insertNode(fragment)
+  } else if (editor.childNodes.length === 1 && editor.firstChild?.nodeName === 'BR') {
+    // An emptied editor keeps one scaffolding <br>; replacing it keeps the
+    // draft clean of a stray leading newline.
+    editor.replaceChildren(fragment)
+  } else {
+    editor.append(fragment)
+  }
+
+  caretAfter(space)
+  delete editor.dataset.empty
+  fireEdit(editor, 'beforeinput')
+  fireEdit(editor, 'input')
+  editor.focus()
+}
+
+let warnedComposerMarkup = false
 
 const quoteSelection = () => {
   const text = selectedChatText()
+  const editor = composerFor()
 
   if (text.trim()) {
-    addQuote(text)
-    window.getSelection()?.removeAllRanges()
-  }
+    if (editor) {
+      // insertQuoteChip replaces the selection with the caret after the chip.
+      insertQuoteChip(editor, text)
+    } else {
+      window.getSelection()?.removeAllRanges()
+      host.composer.insertText?.(null, chipText(text), { mode: 'inline' })
+      host.composer.focus?.(null)
 
-  host.composer.focus(null)
-}
-
-// Slash commands only route when they lead the message, so a quote must not
-// be put in front of one; the chips stay pending for the next normal send.
-const quoteMiddleware = {
-  handler: draft => {
-    const key = sessionKey(host.state.focusedSessionId.get())
-    const pending = $quotes.get()[key]
-
-    if (!pending?.length || draft.text.trimStart().startsWith('/')) {
-      return draft
+      if (!warnedComposerMarkup) {
+        warnedComposerMarkup = true
+        host.notify({
+          kind: 'warning',
+          message:
+            'Quote selection: Hermes changed its composer markup, so quotes insert as plain text. Update COMPOSER_INPUT in plugin.js.'
+        })
+      }
     }
 
-    setQuotes(key, [])
-
-    const quotes = pending.map(q => quote(q.text)).join('\n\n')
-
-    return { ...draft, text: draft.text.trim() ? `${quotes}\n\n${draft.text}` : quotes }
-  }
-}
-
-const chipStyle = {
-  alignItems: 'center',
-  background: 'color-mix(in srgb, var(--ui-accent) 22%, transparent)',
-  border: '1px solid color-mix(in srgb, var(--ui-accent) 35%, transparent)',
-  borderRadius: '6px',
-  color: 'var(--ui-text-primary)',
-  display: 'inline-flex',
-  font: '500 12px/1.4 system-ui, sans-serif',
-  gap: '6px',
-  maxWidth: '320px',
-  padding: '2px 4px 2px 7px'
-}
-
-const labelStyle = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
-
-const removeStyle = {
-  background: 'none',
-  border: 'none',
-  color: 'var(--ui-text-tertiary)',
-  cursor: 'pointer',
-  display: 'inline-flex',
-  padding: '0 2px'
-}
-
-const QuoteChip = ({ quote: q, sessionKey: key }) =>
-  jsxs('span', {
-    'data-quote-chip': '',
-    style: chipStyle,
-    title: q.text,
-    children: [
-      jsx(Codicon, { 'aria-hidden': true, name: 'quote', size: 12 }),
-      jsx('span', { style: labelStyle, children: q.text.replace(/\s+/g, ' ') }),
-      jsx('button', {
-        'aria-label': 'Remove quote',
-        onClick: () => removeQuote(key, q.id),
-        style: removeStyle,
-        type: 'button',
-        children: jsx(Codicon, { 'aria-hidden': true, name: 'close', size: 12 })
-      })
-    ]
-  })
-
-// Every mounted composer renders this slot; it shows the focused chat's
-// quotes, which is the composer the user is typing in.
-const QuoteChips = () => {
-  const quotes = useValue($quotes)
-  const key = sessionKey(useValue(host.state.focusedSessionId))
-  const list = quotes[key] ?? []
-
-  if (!list.length) {
-    return null
+    return
   }
 
-  return jsx('div', {
-    'data-quote-chips': '',
-    style: { display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '6px 8px 0' },
-    children: list.map(q => jsx(QuoteChip, { quote: q, sessionKey: key }, q.id))
-  })
+  // No selection: the chord only moves the cursor to the input.
+  if (editor) {
+    editor.focus()
+    caretEnd(editor)
+  } else {
+    host.composer.focus?.(null)
+  }
 }
 
 // Strict mode: both ends of the selection must sit in the same agent reply, so
@@ -322,6 +423,14 @@ export default {
       return
     }
 
+    if (typeof host?.composer?.insertText !== 'function' || typeof host?.composer?.focus !== 'function') {
+      host.notify({
+        kind: 'warning',
+        message:
+          'Quote selection: host.composer is missing. Inline chips still work, but the plain-text fallback for unknown composer markup is off.'
+      })
+    }
+
     ctx.register({
       id: 'quote',
       area: KEYBINDS_AREA,
@@ -333,10 +442,6 @@ export default {
         run: quoteSelection
       }
     })
-
-    ctx.register({ id: 'chips', area: COMPOSER_AREAS.top, render: () => jsx(QuoteChips, {}) })
-    ctx.register({ id: 'send', area: COMPOSER_AREAS.middleware, data: quoteMiddleware })
-    ctx.onDispose(() => $quotes.set({}))
 
     registerPopup(ctx)
   }
